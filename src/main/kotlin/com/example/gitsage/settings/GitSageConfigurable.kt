@@ -30,7 +30,15 @@ class GitSageConfigurable : Configurable {
     private var currentConvention: CommitConvention = CommitConvention.CONVENTIONAL_COMMITS
     private var currentLanguage: GenerationLanguage = GenerationLanguage.AUTO
 
-    private lateinit var providerTypeCombo: JComboBox<ProviderType>
+    private data class ProviderOption(
+        val id: String,
+        val displayName: String,
+        val providerType: ProviderType
+    ) {
+        override fun toString(): String = displayName
+    }
+
+    private lateinit var providerCombo: JComboBox<ProviderOption>
     private lateinit var baseUrlField: JBTextField
     private lateinit var apiKeyField: JBPasswordField
     private lateinit var modelCombo: ComboBox<String>
@@ -42,7 +50,15 @@ class GitSageConfigurable : Configurable {
     private lateinit var apiKeyRow: JPanel
     private val availableModels = mutableListOf<ModelInfo>()
     private val allModelOptions = mutableListOf<String>()
+    private val displayedModelOptions = mutableListOf<String>()
     private var suppressModelFiltering = false
+    private var suppressProviderSwitch = false
+    private var currentLoadedProviderId: String? = null
+    private val modelSearchDebounceTimer = Timer(120) {
+        filterModelItemsNow()
+    }.apply {
+        isRepeats = false
+    }
 
     override fun getDisplayName(): String = "GitSage"
 
@@ -62,7 +78,7 @@ class GitSageConfigurable : Configurable {
                 add(createGroupLabel("Provider Settings"), gbc)
                 gbc.gridy++
 
-                add(createLabeledRow("Provider Type:", createProviderTypeSelector()), gbc)
+                add(createLabeledRow("Provider:", createProviderSelector()), gbc)
                 gbc.gridy++
 
                 baseUrlField = JBTextField()
@@ -132,9 +148,15 @@ class GitSageConfigurable : Configurable {
         }
     }
 
-    private fun createProviderTypeSelector(): JComponent {
-        providerTypeCombo = ComboBox(ProviderType.values())
-        providerTypeCombo.renderer = object : DefaultListCellRenderer() {
+    private fun createProviderSelector(): JComponent {
+        providerCombo = ComboBox(
+            arrayOf(
+                ProviderOption("openai", "OpenAI", ProviderType.CUSTOM),
+                ProviderOption("opencode", "OpenCode", ProviderType.OPENCODE_GO),
+                ProviderOption("openrouter", "OpenRouter", ProviderType.OPENROUTER)
+            )
+        )
+        providerCombo.renderer = object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(
                 list: JList<*>?,
                 value: Any?,
@@ -143,23 +165,26 @@ class GitSageConfigurable : Configurable {
                 cellHasFocus: Boolean
             ): java.awt.Component {
                 val label = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus) as JLabel
-                label.text = when (value as ProviderType) {
-                    ProviderType.CUSTOM -> "OpenAI Compatible"
-                    ProviderType.OPENCODE_GO -> "OpenCode Go (API Key Required)"
-                    ProviderType.OPENCODE_ZEN -> "OpenCode Zen (API Key Required)"
-                    ProviderType.OPENROUTER -> "OpenRouter"
-                }
+                label.text = (value as? ProviderOption)?.displayName ?: ""
                 return label
             }
         }
-        providerTypeCombo.addActionListener {
-            updateUIForProviderType()
+        providerCombo.addActionListener {
+            if (!suppressProviderSwitch) {
+                switchProvider()
+            }
         }
-        return providerTypeCombo
+        return providerCombo
+    }
+
+    private fun switchProvider() {
+        saveCurrentProviderDraft()
+        val selectedProvider = getSelectedProviderConfig() ?: return
+        loadProviderSettings(selectedProvider)
     }
 
     private fun updateUIForProviderType() {
-        val selectedType = providerTypeCombo.selectedItem as? ProviderType ?: ProviderType.CUSTOM
+        val selectedType = getSelectedProviderOption()?.providerType ?: ProviderType.CUSTOM
 
         when (selectedType) {
             ProviderType.CUSTOM -> {
@@ -213,9 +238,10 @@ class GitSageConfigurable : Configurable {
 
         val selectedProvider = settings.getSelectedProvider()
         if (selectedProvider != null) {
+            selectProviderById(selectedProvider.id)
             loadProviderSettings(selectedProvider)
         } else {
-            providerTypeCombo.selectedItem = ProviderType.CUSTOM
+            selectProviderById("openai")
             baseUrlField.text = "https://api.openai.com/v1"
             setAllModelOptions(emptyList())
             updateUIForProviderType()
@@ -223,7 +249,8 @@ class GitSageConfigurable : Configurable {
     }
 
     private fun loadProviderSettings(provider: AIProviderConfig) {
-        providerTypeCombo.selectedItem = provider.providerType
+        selectProviderById(provider.id)
+        currentLoadedProviderId = provider.id
         baseUrlField.text = provider.getEffectiveBaseUrl()
         temperatureField.text = provider.temperature.toString()
         maxTokensField.text = provider.maxTokens.toString()
@@ -249,7 +276,7 @@ class GitSageConfigurable : Configurable {
     private fun fetchModels() {
         logger.info("[GitSageConfigurable] fetchModels() called")
         
-        val providerType = providerTypeCombo.selectedItem as? ProviderType ?: ProviderType.CUSTOM
+        val providerType = getSelectedProviderOption()?.providerType ?: ProviderType.CUSTOM
         val baseUrl = when (providerType) {
             ProviderType.OPENCODE_GO, ProviderType.OPENCODE_ZEN -> "https://opencode.ai"
             ProviderType.OPENROUTER -> "https://openrouter.ai/api"
@@ -320,7 +347,7 @@ class GitSageConfigurable : Configurable {
     private fun testConnection() {
         logger.info("[GitSageConfigurable] testConnection() called")
 
-        val providerType = providerTypeCombo.selectedItem as? ProviderType ?: ProviderType.CUSTOM
+        val providerType = getSelectedProviderOption()?.providerType ?: ProviderType.CUSTOM
         val baseUrl = when (providerType) {
             ProviderType.OPENCODE_GO, ProviderType.OPENCODE_ZEN -> "https://opencode.ai"
             ProviderType.OPENROUTER -> "https://openrouter.ai/api"
@@ -401,9 +428,11 @@ class GitSageConfigurable : Configurable {
     }
 
     override fun isModified(): Boolean {
-        val provider = settings.getSelectedProvider()
+        val provider = getSelectedProviderConfig()
+        val selectedProviderId = getSelectedProviderOption()?.id
         return provider?.let {
-            it.providerType != providerTypeCombo.selectedItem ||
+            settings.state.selectedProviderId != selectedProviderId ||
+            it.providerType != getSelectedProviderOption()?.providerType ||
             it.baseUrl != baseUrlField.text ||
             CredentialsManager.getApiKey(it.id) != String(apiKeyField.password) ||
             it.model != getModelEditorText() ||
@@ -415,24 +444,12 @@ class GitSageConfigurable : Configurable {
     }
 
     override fun apply() {
-        val providerType = providerTypeCombo.selectedItem as ProviderType
-
-        val providerId = when (providerType) {
-            ProviderType.CUSTOM -> "openai"
-            ProviderType.OPENCODE_GO, ProviderType.OPENCODE_ZEN -> "opencode"
-            ProviderType.OPENROUTER -> "openrouter"
-        }
-
-        val providerName = when (providerType) {
-            ProviderType.CUSTOM -> "OpenAI"
-            ProviderType.OPENCODE_GO, ProviderType.OPENCODE_ZEN -> "OpenCode"
-            ProviderType.OPENROUTER -> "OpenRouter"
-        }
+        val selectedProvider = getSelectedProviderOption() ?: return
 
         val provider = AIProviderConfig(
-            id = providerId,
-            name = providerName,
-            providerType = providerType,
+            id = selectedProvider.id,
+            name = selectedProvider.displayName,
+            providerType = selectedProvider.providerType,
             baseUrl = baseUrlField.text,
             model = getModelEditorText(),
             temperature = temperatureField.text.toDoubleOrNull() ?: 0.7,
@@ -442,7 +459,7 @@ class GitSageConfigurable : Configurable {
         )
 
         settings.saveProvider(provider)
-        settings.setSelectedProvider(providerId)
+        settings.setSelectedProvider(selectedProvider.id)
         settings.setConvention(conventionCombo.selectedItem as CommitConvention)
         settings.setLanguage(languageCombo.selectedItem as GenerationLanguage)
     }
@@ -459,13 +476,18 @@ class GitSageConfigurable : Configurable {
     private fun setupModelSearch() {
         val editorComponent = modelCombo.editor.editorComponent as? JTextComponent ?: return
         editorComponent.document.addDocumentListener(object : DocumentListener {
-            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) = filterModelItems()
-            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) = filterModelItems()
-            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) = filterModelItems()
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) = scheduleModelFiltering()
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) = scheduleModelFiltering()
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) = scheduleModelFiltering()
         })
     }
 
-    private fun filterModelItems() {
+    private fun scheduleModelFiltering() {
+        if (suppressModelFiltering) return
+        modelSearchDebounceTimer.restart()
+    }
+
+    private fun filterModelItemsNow() {
         if (suppressModelFiltering) return
 
         val query = getModelEditorText()
@@ -473,22 +495,22 @@ class GitSageConfigurable : Configurable {
         val filteredItems = sourceItems
             .filter { it.contains(query, ignoreCase = true) }
 
-        refreshModelComboItems(if (query.isBlank()) sourceItems else filteredItems)
+        val targetItems = if (query.isBlank()) sourceItems else filteredItems
+        val shouldRefreshItems = targetItems != displayedModelOptions
+        if (shouldRefreshItems) {
+            refreshModelComboItems(targetItems)
+        }
+
         setModelSelection(query)
 
-        if (filteredItems.isNotEmpty() && modelCombo.isDisplayable) {
-            modelCombo.setPopupVisible(true)
-        } else {
-            modelCombo.setPopupVisible(false)
+        val shouldShowPopup = query.isNotBlank() && filteredItems.isNotEmpty() && modelCombo.isDisplayable
+        if (modelCombo.isPopupVisible != shouldShowPopup) {
+            modelCombo.setPopupVisible(shouldShowPopup)
         }
     }
 
     private fun getFilterSourceModels(): List<String> {
-        val fetchedModelIds = availableModels.map { it.id }
-        return (fetchedModelIds + allModelOptions)
-            .filter { it.isNotBlank() }
-            .distinct()
-            .sorted()
+        return allModelOptions
     }
 
     private fun setAllModelOptions(items: List<String>) {
@@ -500,6 +522,8 @@ class GitSageConfigurable : Configurable {
     private fun refreshModelComboItems(items: List<String>) {
         suppressModelFiltering = true
         try {
+            displayedModelOptions.clear()
+            displayedModelOptions.addAll(items)
             modelCombo.removeAllItems()
             items.forEach { modelCombo.addItem(it) }
         } finally {
@@ -524,14 +548,82 @@ class GitSageConfigurable : Configurable {
     }
 
     private fun updateCachedModels(models: MutableList<String>) {
-        val selectedProvider = settings.getSelectedProvider()
+        val selectedProvider = getSelectedProviderConfig()
         selectedProvider?.let { provider ->
             val updatedProvider = provider.copy(cachedModels = models)
             settings.saveProvider(updatedProvider)
         }
     }
 
+    private fun getSelectedProviderOption(): ProviderOption? {
+        return providerCombo.selectedItem as? ProviderOption
+    }
+
+    private fun getSelectedProviderConfig(): AIProviderConfig? {
+        val selectedProviderId = getSelectedProviderOption()?.id ?: return null
+        return settings.state.providers.find { it.id == selectedProviderId }
+    }
+
+    private fun selectProviderById(providerId: String) {
+        val model = providerCombo.model
+        suppressProviderSwitch = true
+        try {
+            for (index in 0 until model.size) {
+                val option = model.getElementAt(index)
+                if (option.id == providerId) {
+                    providerCombo.selectedIndex = index
+                    return
+                }
+            }
+        } finally {
+            suppressProviderSwitch = false
+        }
+    }
+
+    private fun saveCurrentProviderDraft() {
+        val loadedProviderId = currentLoadedProviderId ?: return
+        val selectedProvider = getProviderOptionById(loadedProviderId) ?: return
+        val currentModel = getModelEditorText()
+        val apiKey = String(apiKeyField.password)
+        val existingProvider = settings.state.providers.find { it.id == loadedProviderId }
+
+        val provider = AIProviderConfig(
+            id = selectedProvider.id,
+            name = selectedProvider.displayName,
+            providerType = selectedProvider.providerType,
+            baseUrl = baseUrlField.text.ifBlank { existingProvider?.baseUrl ?: defaultBaseUrlFor(selectedProvider.providerType) },
+            model = currentModel.ifBlank { existingProvider?.model ?: "" },
+            temperature = temperatureField.text.toDoubleOrNull() ?: existingProvider?.temperature ?: 0.7,
+            maxTokens = maxTokensField.text.toIntOrNull() ?: existingProvider?.maxTokens ?: 500,
+            apiKey = apiKey,
+            cachedModels = getCurrentCachedModels()
+        )
+
+        settings.saveProvider(provider)
+    }
+
+    private fun defaultBaseUrlFor(providerType: ProviderType): String {
+        return when (providerType) {
+            ProviderType.CUSTOM -> "https://api.openai.com/v1"
+            ProviderType.OPENCODE_GO, ProviderType.OPENCODE_ZEN -> "https://opencode.ai"
+            ProviderType.OPENROUTER -> "https://openrouter.ai/api/v1"
+        }
+    }
+
+    private fun getProviderOptionById(providerId: String): ProviderOption? {
+        val model = providerCombo.model
+        for (index in 0 until model.size) {
+            val option = model.getElementAt(index)
+            if (option.id == providerId) {
+                return option
+            }
+        }
+        return null
+    }
+
     override fun reset() {
+        modelSearchDebounceTimer.stop()
+        currentLoadedProviderId = null
         loadSettings()
     }
 }
