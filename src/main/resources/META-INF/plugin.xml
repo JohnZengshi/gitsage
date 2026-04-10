@@ -1,0 +1,51 @@
+<idea-plugin>
+    <id>com.example.gitsage</id>
+    <name>GitSage</name>
+    <version>1.0.0</version>
+    <vendor>GitSage</vendor>
+
+    <description><![CDATA[
+        GitSage - Intelligent Git commit message generator powered by AI.
+        Supports OpenAI, OpenCode, OpenRouter, and other OpenAI-compatible APIs.
+        Features multiple commit conventions, model caching, and seamless IDE integration.
+    ]]></description>
+
+    <change-notes><![CDATA[
+        Initial release with multi-provider AI support (OpenAI, OpenCode, OpenRouter).
+    ]]></change-notes>
+
+    <idea-version since-build="231" until-build="999.*"/>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>Git4Idea</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Settings -->
+        <applicationService
+            serviceImplementation="com.example.gitsage.settings.GitSageSettings"/>
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.example.gitsage.settings.GitSageConfigurable"
+            id="com.example.gitsage.settings.GitSageConfigurable"
+            displayName="GitSage"/>
+
+        <!-- Notifications -->
+        <notificationGroup
+            id="GitSage"
+            displayType="BALLOON"/>
+
+        <!-- Startup Activity -->
+        <postStartupActivity implementation="com.example.gitsage.GitSagePlugin"/>
+    </extensions>
+
+    <actions>
+        <action
+            id="com.example.gitsage.GenerateCommitAction"
+            class="com.example.gitsage.ui.GenerateCommitAction"
+            text="Generate Commit Message"
+            description="Generate commit message using AI"
+            icon="/icons/gitsage.svg">
+            <add-to-group group-id="Vcs.MessageActionGroup" anchor="first"/>
+        </action>
+    </actions>
+</idea-plugin>
