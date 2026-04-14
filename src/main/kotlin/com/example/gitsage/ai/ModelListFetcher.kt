@@ -10,6 +10,7 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import java.io.IOException
+import java.net.SocketTimeoutException
 
 data class ModelInfo(
     val id: String,
@@ -21,13 +22,13 @@ object ModelListFetcher {
     private val logger = Logger.getInstance(ModelListFetcher::class.java)
     private val gson = Gson()
     private const val OPENCODE_MODELS_URL = "https://opencode.ai/zen/v1/models"
+    private const val MAX_REMOTE_ERROR_CHARS = 300
 
     fun fetchModels(baseUrl: String, apiKey: String, providerType: ProviderType = ProviderType.CUSTOM): List<ModelInfo> {
-        logger.info("[ModelListFetcher] Starting fetchModels")
-        logger.info("[ModelListFetcher] ProviderType: $providerType")
-        logger.info("[ModelListFetcher] BaseUrl: $baseUrl")
-        logger.info("[ModelListFetcher] API Key length: ${apiKey.length}")
-        logger.info("[ModelListFetcher] API Key first 10 chars: ${apiKey.take(10)}...")
+        logger.debug("[ModelListFetcher] Starting fetchModels")
+        logger.debug("[ModelListFetcher] ProviderType: $providerType")
+        logger.debug("[ModelListFetcher] BaseUrl: $baseUrl")
+        logger.debug("[ModelListFetcher] API Key length: ${apiKey.length}")
         
         return when (providerType) {
             ProviderType.OPENCODE_ZEN, ProviderType.OPENCODE_GO -> fetchOpenCodeModels(apiKey)
@@ -37,11 +38,11 @@ object ModelListFetcher {
     }
 
     private fun fetchOpenCodeModels(apiKey: String): List<ModelInfo> {
-        logger.info("[ModelListFetcher] fetchOpenCodeModels called")
-        logger.info("[ModelListFetcher] URL: $OPENCODE_MODELS_URL")
+        logger.debug("[ModelListFetcher] fetchOpenCodeModels called")
+        logger.debug("[ModelListFetcher] URL: $OPENCODE_MODELS_URL")
         
         val client = HttpClientConfig.createClient()
-        logger.info("[ModelListFetcher] HTTP client created")
+        logger.debug("[ModelListFetcher] HTTP client created")
 
         val request = Request.Builder()
             .url(OPENCODE_MODELS_URL)
@@ -49,15 +50,15 @@ object ModelListFetcher {
             .addHeader("Authorization", "Bearer $apiKey")
             .addHeader("Content-Type", "application/json")
             .build()
-        logger.info("[ModelListFetcher] HTTP request built")
+        logger.debug("[ModelListFetcher] HTTP request built")
 
         return try {
-            logger.info("[ModelListFetcher] Executing HTTP request...")
+            logger.debug("[ModelListFetcher] Executing HTTP request...")
             client.newCall(request).execute().use { response ->
-                logger.info("[ModelListFetcher] Response received")
-                logger.info("[ModelListFetcher] Response code: ${response.code}")
-                logger.info("[ModelListFetcher] Response message: ${response.message}")
-                logger.info("[ModelListFetcher] Response headers: ${response.headers}")
+                logger.debug("[ModelListFetcher] Response received")
+                logger.debug("[ModelListFetcher] Response code: ${response.code}")
+                logger.debug("[ModelListFetcher] Response message: ${response.message}")
+                logger.debug("[ModelListFetcher] Response headers: ${response.headers}")
                 
                 if (!response.isSuccessful) {
                     val errorBody = response.body?.string() ?: "No response body"
@@ -65,29 +66,26 @@ object ModelListFetcher {
                     logger.error("[ModelListFetcher] Error body: $errorBody")
                     throw AIProviderException.APIException(
                         response.code,
-                        "HTTP ${response.code}: ${response.message}\n\nResponse body:\n$errorBody"
+                        "HTTP ${response.code}: ${response.message}. ${compactRemoteError(errorBody)}"
                     )
                 }
 
                 val responseBody = response.body?.string()
                     ?: throw AIProviderException.APIException(-1, "Empty response body")
                 
-                logger.info("[ModelListFetcher] Response body length: ${responseBody.length}")
-                logger.info("[ModelListFetcher] Response body preview: ${responseBody.take(500)}")
+                logger.debug("[ModelListFetcher] Response body length: ${responseBody.length}")
+                logger.debug("[ModelListFetcher] Response body preview: ${responseBody.take(500)}")
 
                 parseModels(responseBody)
             }
+        } catch (e: SocketTimeoutException) {
+            logger.error("[ModelListFetcher] Timeout fetching OpenCode models", e)
+            throw AIProviderException.NetworkException(timeoutMessage("fetching model list"))
         } catch (e: IOException) {
             logger.error("[ModelListFetcher] Network error fetching OpenCode models", e)
-            val errorDetail = buildString {
-                appendLine("Network error: ${e.message}")
-                appendLine()
-                appendLine("URL: $OPENCODE_MODELS_URL")
-                appendLine()
-                appendLine("Stack trace:")
-                e.stackTrace.take(10).forEach { appendLine(it.toString()) }
-            }
-            throw AIProviderException.NetworkException(errorDetail)
+            throw AIProviderException.NetworkException(
+                "Network error: ${e.message ?: "unknown"}. Full details are in IDE logs."
+            )
         }
     }
 
@@ -117,6 +115,9 @@ object ModelListFetcher {
 
                 parseModels(responseBody)
             }
+        } catch (e: SocketTimeoutException) {
+            logger.error("Timeout fetching custom models", e)
+            throw AIProviderException.NetworkException(timeoutMessage("fetching model list"))
         } catch (e: IOException) {
             logger.error("Network error fetching models", e)
             throw AIProviderException.NetworkException("Failed to fetch models: ${e.message}")
@@ -149,6 +150,9 @@ object ModelListFetcher {
 
                 parseModels(responseBody)
             }
+        } catch (e: SocketTimeoutException) {
+            logger.error("Timeout fetching OpenRouter models", e)
+            throw AIProviderException.NetworkException(timeoutMessage("fetching model list"))
         } catch (e: IOException) {
             logger.error("Network error fetching OpenRouter models", e)
             throw AIProviderException.NetworkException("Failed to fetch models: ${e.message}")
@@ -161,13 +165,13 @@ object ModelListFetcher {
         providerType: ProviderType = ProviderType.CUSTOM,
         model: String? = null
     ): Pair<Boolean, String> {
-        logger.info("[ModelListFetcher] testConnection called")
-        logger.info("[ModelListFetcher] ProviderType: $providerType")
-        logger.info("[ModelListFetcher] BaseUrl: $baseUrl")
-        logger.info("[ModelListFetcher] Model: $model")
+        logger.debug("[ModelListFetcher] testConnection called")
+        logger.debug("[ModelListFetcher] ProviderType: $providerType")
+        logger.debug("[ModelListFetcher] BaseUrl: $baseUrl")
+        logger.debug("[ModelListFetcher] Model: $model")
 
         return if (model.isNullOrBlank()) {
-            logger.info("[ModelListFetcher] No model specified, fetching model list")
+            logger.debug("[ModelListFetcher] No model specified, fetching model list")
             try {
                 val models = fetchModels(baseUrl, apiKey, providerType)
                 if (models.isNotEmpty()) {
@@ -183,7 +187,7 @@ object ModelListFetcher {
                 throw e
             }
         } else {
-            logger.info("[ModelListFetcher] Testing specific model: $model")
+            logger.debug("[ModelListFetcher] Testing specific model: $model")
             testModelCompletion(baseUrl, apiKey, providerType, model)
         }
     }
@@ -210,7 +214,7 @@ object ModelListFetcher {
             append("}")
         }
 
-        logger.info("[ModelListFetcher] Testing model completion at: $chatUrl")
+        logger.debug("[ModelListFetcher] Testing model completion at: $chatUrl")
 
         val request = Request.Builder()
             .url(chatUrl)
@@ -221,7 +225,7 @@ object ModelListFetcher {
 
         return try {
             client.newCall(request).execute().use { response ->
-                logger.info("[ModelListFetcher] Test response code: ${response.code}")
+                logger.debug("[ModelListFetcher] Test response code: ${response.code}")
 
                 if (!response.isSuccessful) {
                     val errorBody = response.body?.string() ?: "No response body"
@@ -233,7 +237,7 @@ object ModelListFetcher {
                         json.getAsJsonObject("error")?.get("message")?.asString
                             ?: "HTTP ${response.code}: ${response.message}"
                     } catch (e: Exception) {
-                        "HTTP ${response.code}: ${response.message}\n\n$errorBody"
+                        "HTTP ${response.code}: ${response.message}. ${compactRemoteError(errorBody)}"
                     }
 
                     throw AIProviderException.APIException(response.code, errorMessage)
@@ -242,11 +246,14 @@ object ModelListFetcher {
                 val responseBody = response.body?.string()
                     ?: throw AIProviderException.APIException(-1, "Empty response body")
 
-                logger.info("[ModelListFetcher] Model test successful")
-                logger.info("[ModelListFetcher] Response preview: ${responseBody.take(200)}")
+                logger.debug("[ModelListFetcher] Model test successful")
+                logger.debug("[ModelListFetcher] Response preview: ${responseBody.take(200)}")
 
                 Pair(true, "Model '$model' is working! Connection test successful.")
             }
+        } catch (e: SocketTimeoutException) {
+            logger.error("[ModelListFetcher] Timeout testing model", e)
+            throw AIProviderException.NetworkException(timeoutMessage("testing connection"))
         } catch (e: IOException) {
             logger.error("[ModelListFetcher] Network error testing model", e)
             throw AIProviderException.NetworkException("Failed to test model: ${e.message}")
@@ -254,19 +261,19 @@ object ModelListFetcher {
     }
 
     private fun parseModels(responseBody: String): List<ModelInfo> {
-        logger.info("[ModelListFetcher] Parsing models response")
+        logger.debug("[ModelListFetcher] Parsing models response")
         return try {
             val json = gson.fromJson(responseBody, JsonObject::class.java)
-            logger.info("[ModelListFetcher] JSON parsed successfully")
-            logger.info("[ModelListFetcher] JSON keys: ${json.keySet()}")
+            logger.debug("[ModelListFetcher] JSON parsed successfully")
+            logger.debug("[ModelListFetcher] JSON keys: ${json.keySet()}")
             
             val data = when {
                 json.has("data") -> {
-                    logger.info("[ModelListFetcher] Found 'data' array")
+                    logger.debug("[ModelListFetcher] Found 'data' array")
                     json.getAsJsonArray("data")
                 }
                 json.has("models") -> {
-                    logger.info("[ModelListFetcher] Found 'models' array")
+                    logger.debug("[ModelListFetcher] Found 'models' array")
                     json.getAsJsonArray("models")
                 }
                 else -> {
@@ -275,7 +282,7 @@ object ModelListFetcher {
                 }
             } ?: return emptyList()
 
-            logger.info("[ModelListFetcher] Data array size: ${data.size()}")
+            logger.debug("[ModelListFetcher] Data array size: ${data.size()}")
 
             val models = data.mapNotNull { element ->
                 try {
@@ -297,11 +304,31 @@ object ModelListFetcher {
                 }
             }
             
-            logger.info("[ModelListFetcher] Successfully parsed ${models.size} models")
+            logger.debug("[ModelListFetcher] Successfully parsed ${models.size} models")
             models
         } catch (e: Exception) {
             logger.error("[ModelListFetcher] Failed to parse models response", e)
             emptyList()
         }
+    }
+
+    private fun compactRemoteError(raw: String): String {
+        val normalized = raw
+            .replace("\r\n", "\n")
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+
+        if (normalized.isEmpty()) return "No error details returned by provider."
+        return if (normalized.length > MAX_REMOTE_ERROR_CHARS) {
+            normalized.take(MAX_REMOTE_ERROR_CHARS) + "..."
+        } else {
+            normalized
+        }
+    }
+
+    private fun timeoutMessage(action: String): String {
+        return "Request timed out while $action. Please retry or check network/proxy settings."
     }
 }

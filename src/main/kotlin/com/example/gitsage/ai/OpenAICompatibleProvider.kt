@@ -10,7 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
-import java.util.concurrent.TimeUnit
+import java.net.SocketTimeoutException
 
 class OpenAICompatibleProvider : AIProvider {
     private val logger = Logger.getInstance(OpenAICompatibleProvider::class.java)
@@ -77,6 +77,9 @@ class OpenAICompatibleProvider : AIProvider {
 
                 parseResponse(responseBody)
             }
+        } catch (e: SocketTimeoutException) {
+            logger.error("Request timeout", e)
+            throw AIProviderException.NetworkException("Request timed out. Please retry or increase timeout settings.")
         } catch (e: IOException) {
             logger.error("Network error", e)
             throw AIProviderException.NetworkException("Failed to connect to API: ${e.message}")
@@ -96,10 +99,66 @@ class OpenAICompatibleProvider : AIProvider {
             val message = firstChoice.getAsJsonObject("message")
             val content = message.get("content").asString
 
-            content.trim().trim('"')
+            sanitizeCommitMessage(content)
         } catch (e: Exception) {
             logger.error("Failed to parse response", e)
             throw AIProviderException.APIException(-1, "Failed to parse API response")
         }
+    }
+
+    private fun sanitizeCommitMessage(raw: String): String {
+        val compact = raw
+            .replace("\r\n", "\n")
+            .trim()
+            .trim('"')
+
+        val noFence = compact
+            .replace("```[a-zA-Z0-9_-]*\\n".toRegex(), "")
+            .replace("```", "")
+
+        val lines = noFence
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .map { stripListPrefix(stripMetaPrefix(it)) }
+            .filter { it.isNotEmpty() }
+            .toList()
+
+        val preferred = lines.firstOrNull { isLikelyCommitLine(it) }
+            ?: lines.firstOrNull()
+            ?: "Update changes"
+
+        return preferred.take(120).trim()
+    }
+
+    private fun stripMetaPrefix(line: String): String {
+        return line
+            .replace("^(commit message\\s*[:：]\\s*)".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("^(message\\s*[:：]\\s*)".toRegex(RegexOption.IGNORE_CASE), "")
+    }
+
+    private fun stripListPrefix(line: String): String {
+        return line
+            .replace("^[\\-*•]\\s+".toRegex(), "")
+            .replace("^\\d+[.)]\\s+".toRegex(), "")
+    }
+
+    private fun isLikelyCommitLine(line: String): Boolean {
+        if (line.length > 120 || line.endsWith(":")) return false
+
+        val lower = line.lowercase()
+        val metaStarts = listOf(
+            "the user wants",
+            "let me",
+            "requirements",
+            "possible messages",
+            "actually",
+            "since it",
+            "analysis",
+            "git diff"
+        )
+        if (metaStarts.any { lower.startsWith(it) }) return false
+
+        return true
     }
 }

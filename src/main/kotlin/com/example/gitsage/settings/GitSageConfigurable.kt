@@ -2,9 +2,13 @@ package com.example.gitsage.settings
 
 import com.example.gitsage.ai.ModelInfo
 import com.example.gitsage.ai.ModelListFetcher
+import com.example.gitsage.notifications.NotificationHelper
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.options.Configurable
+import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.ui.Gray
+import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPasswordField
 import com.intellij.ui.components.JBTextField
@@ -14,8 +18,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.BorderLayout
+import java.awt.Color
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Font
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import javax.swing.*
@@ -48,11 +54,18 @@ class GitSageConfigurable : Configurable {
     private lateinit var languageCombo: JComboBox<GenerationLanguage>
     private lateinit var baseUrlRow: JPanel
     private lateinit var apiKeyRow: JPanel
+    private lateinit var fetchModelsButton: JButton
+    private lateinit var testConnectionButton: JButton
+    private lateinit var operationStatusLabel: JLabel
+    private lateinit var formComponents: List<JComponent>
     private val availableModels = mutableListOf<ModelInfo>()
     private val allModelOptions = mutableListOf<String>()
     private val displayedModelOptions = mutableListOf<String>()
+    private val freeModelIds = mutableSetOf<String>()
     private var suppressModelFiltering = false
     private var suppressProviderSwitch = false
+    private var isFetchingModels = false
+    private var isTestingConnection = false
     private var currentLoadedProviderId: String? = null
     private val modelSearchDebounceTimer = Timer(120) {
         filterModelItemsNow()
@@ -64,12 +77,20 @@ class GitSageConfigurable : Configurable {
 
     override fun createComponent(): JComponent? {
         mainPanel = JPanel(BorderLayout()).apply {
-            border = JBUI.Borders.empty(10)
+            border = JBUI.Borders.empty(16)
+            background = geistBackground()
 
             val contentPanel = JPanel(GridBagLayout()).apply {
+                isOpaque = true
+                background = geistCardBackground()
+                border = JBUI.Borders.compound(
+                    JBUI.Borders.customLine(geistBorderColor(), 1),
+                    JBUI.Borders.empty(16)
+                )
+
                 val gbc = GridBagConstraints().apply {
                     fill = GridBagConstraints.HORIZONTAL
-                    insets = JBUI.insets(5)
+                    insets = JBUI.insets(8)
                     gridx = 0
                     gridy = 0
                     weightx = 1.0
@@ -95,6 +116,14 @@ class GitSageConfigurable : Configurable {
                 gbc.gridy++
 
                 add(createButtonRow(), gbc)
+                gbc.gridy++
+
+                operationStatusLabel = JBLabel("Ready").apply {
+                    font = font.deriveFont(Font.PLAIN, font.size.toFloat())
+                    foreground = geistMutedForeground()
+                    border = JBUI.Borders.empty(0, 2, 0, 0)
+                }
+                add(operationStatusLabel, gbc)
                 gbc.gridy++
 
                 temperatureField = JBTextField("0.7")
@@ -123,7 +152,21 @@ class GitSageConfigurable : Configurable {
                 add(Box.createVerticalGlue(), gbc)
             }
 
-            add(JScrollPane(contentPanel), BorderLayout.CENTER)
+            formComponents = listOf(
+                providerCombo,
+                baseUrlField,
+                apiKeyField,
+                modelCombo,
+                temperatureField,
+                maxTokensField,
+                conventionCombo,
+                languageCombo
+            )
+
+            add(JScrollPane(contentPanel).apply {
+                border = JBUI.Borders.empty()
+                viewport.background = geistBackground()
+            }, BorderLayout.CENTER)
         }
 
         loadSettings()
@@ -134,14 +177,17 @@ class GitSageConfigurable : Configurable {
     private fun createGroupLabel(text: String): JLabel {
         return JBLabel(text).apply {
             font = font.deriveFont(java.awt.Font.BOLD, font.size + 2f)
-            border = JBUI.Borders.empty(0, 0, 5, 0)
+            foreground = geistForeground()
+            border = JBUI.Borders.empty(0, 0, 8, 0)
         }
     }
 
     private fun createLabeledRow(label: String, component: JComponent): JPanel {
         return JPanel(BorderLayout(JBUI.scale(10), 0)).apply {
+            isOpaque = false
             val labelComp = JBLabel(label).apply {
                 preferredSize = Dimension(JBUI.scale(120), preferredSize.height)
+                foreground = geistMutedForeground()
             }
             add(labelComp, BorderLayout.WEST)
             add(component, BorderLayout.CENTER)
@@ -220,14 +266,37 @@ class GitSageConfigurable : Configurable {
 
     private fun createButtonRow(): JPanel {
         return JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(10), 0)).apply {
-            add(JButton("Fetch Models").apply {
+            isOpaque = false
+            fetchModelsButton = JButton("Fetch Models").apply {
                 addActionListener { fetchModels() }
-            })
-            add(JButton("Test Connection").apply {
+            }
+            testConnectionButton = JButton("Test Connection").apply {
                 addActionListener { testConnection() }
-            })
+            }
+
+            styleActionButton(fetchModelsButton)
+            styleActionButton(testConnectionButton)
+
+            add(fetchModelsButton)
+            add(testConnectionButton)
         }
     }
+
+    private fun styleActionButton(button: JButton) {
+        button.background = geistForeground()
+        button.foreground = geistBackground()
+        button.border = JBUI.Borders.compound(
+            JBUI.Borders.customLine(geistForeground(), 1),
+            JBUI.Borders.empty(6, 12)
+        )
+        button.isFocusPainted = false
+    }
+
+    private fun geistBackground(): Color = JBColor(Color(0xFA, 0xFA, 0xFA), Gray._30)
+    private fun geistCardBackground(): Color = JBColor(Color.WHITE, Gray._40)
+    private fun geistForeground(): Color = JBColor(Color(0x11, 0x11, 0x11), Gray._230)
+    private fun geistMutedForeground(): Color = JBColor(Color(0x66, 0x66, 0x66), Gray._180)
+    private fun geistBorderColor(): Color = JBColor(Color(0xEA, 0xEA, 0xEA), Gray._90)
 
     private fun loadSettings() {
         currentConvention = settings.state.convention
@@ -259,6 +328,7 @@ class GitSageConfigurable : Configurable {
         apiKeyField.text = savedApiKey ?: ""
 
         availableModels.clear()
+        freeModelIds.clear()
         setAllModelOptions(provider.cachedModels)
 
         if (provider.model.isNotBlank()) {
@@ -274,7 +344,8 @@ class GitSageConfigurable : Configurable {
     }
 
     private fun fetchModels() {
-        logger.info("[GitSageConfigurable] fetchModels() called")
+        if (isFetchingModels || isTestingConnection) return
+        logger.debug("[GitSageConfigurable] fetchModels() called")
         
         val providerType = getSelectedProviderOption()?.providerType ?: ProviderType.CUSTOM
         val baseUrl = when (providerType) {
@@ -284,9 +355,9 @@ class GitSageConfigurable : Configurable {
         }
         val apiKey = String(apiKeyField.password)
 
-        logger.info("[GitSageConfigurable] ProviderType: $providerType")
-        logger.info("[GitSageConfigurable] BaseUrl: $baseUrl")
-        logger.info("[GitSageConfigurable] API Key length: ${apiKey.length}")
+        logger.debug("[GitSageConfigurable] ProviderType: $providerType")
+        logger.debug("[GitSageConfigurable] BaseUrl: $baseUrl")
+        logger.debug("[GitSageConfigurable] API Key length: ${apiKey.length}")
 
         if (baseUrl.isBlank()) {
             showMessage("Please enter Base URL", "Validation Error", JOptionPane.WARNING_MESSAGE)
@@ -298,22 +369,27 @@ class GitSageConfigurable : Configurable {
             return
         }
 
+        setBusyState(fetchingModels = true)
+
         CoroutineScope(Dispatchers.IO).launch {
-            logger.info("[GitSageConfigurable] Starting coroutine to fetch models")
+            logger.debug("[GitSageConfigurable] Starting coroutine to fetch models")
             try {
-                logger.info("[GitSageConfigurable] Calling ModelListFetcher.fetchModels()")
+                logger.debug("[GitSageConfigurable] Calling ModelListFetcher.fetchModels()")
                 val models = ModelListFetcher.fetchModels(baseUrl, apiKey, providerType)
-                logger.info("[GitSageConfigurable] Fetched ${models.size} models")
+                logger.debug("[GitSageConfigurable] Fetched ${models.size} models")
                 withContext(Dispatchers.Main) {
                     availableModels.clear()
                     availableModels.addAll(models)
 
-                    val modelIds = models.map { it.id }.toMutableList()
+                    freeModelIds.clear()
+                    freeModelIds.addAll(extractFreeModelIds(models))
+
+                    val modelIds = sortModelsFreeFirst(models).toMutableList()
                     setAllModelOptions(modelIds)
                     updateCachedModels(modelIds)
 
                     if (models.isNotEmpty()) {
-                        setModelSelection(models.first().id)
+                        setModelSelection(modelIds.first())
                         showMessage(
                             "Successfully fetched ${models.size} models",
                             "Success",
@@ -330,22 +406,20 @@ class GitSageConfigurable : Configurable {
             } catch (e: Exception) {
                 logger.error("[GitSageConfigurable] Exception in fetchModels", e)
                 withContext(Dispatchers.Main) {
-                    val errorDetail = buildString {
-                        appendLine("Error Type: ${e.javaClass.simpleName}")
-                        appendLine()
-                        appendLine("Message: ${e.message}")
-                        appendLine()
-                        appendLine("Stack Trace:")
-                        e.stackTrace.take(15).forEach { appendLine(it.toString()) }
-                    }
+                    val errorDetail = buildCompactErrorDetail(e)
                     showDetailedError("Failed to Fetch Models", errorDetail)
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    setBusyState(fetchingModels = false)
                 }
             }
         }
     }
 
     private fun testConnection() {
-        logger.info("[GitSageConfigurable] testConnection() called")
+        if (isFetchingModels || isTestingConnection) return
+        logger.debug("[GitSageConfigurable] testConnection() called")
 
         val providerType = getSelectedProviderOption()?.providerType ?: ProviderType.CUSTOM
         val baseUrl = when (providerType) {
@@ -356,10 +430,10 @@ class GitSageConfigurable : Configurable {
         val apiKey = String(apiKeyField.password)
         val selectedModel = modelCombo.selectedItem?.toString()
 
-        logger.info("[GitSageConfigurable] testConnection - ProviderType: $providerType")
-        logger.info("[GitSageConfigurable] testConnection - BaseUrl: $baseUrl")
-        logger.info("[GitSageConfigurable] testConnection - API Key length: ${apiKey.length}")
-        logger.info("[GitSageConfigurable] testConnection - Selected Model: $selectedModel")
+        logger.debug("[GitSageConfigurable] testConnection - ProviderType: $providerType")
+        logger.debug("[GitSageConfigurable] testConnection - BaseUrl: $baseUrl")
+        logger.debug("[GitSageConfigurable] testConnection - API Key length: ${apiKey.length}")
+        logger.debug("[GitSageConfigurable] testConnection - Selected Model: $selectedModel")
 
         if (baseUrl.isBlank()) {
             showMessage("Please enter Base URL", "Validation Error", JOptionPane.WARNING_MESSAGE)
@@ -371,12 +445,14 @@ class GitSageConfigurable : Configurable {
             return
         }
 
+        setBusyState(testingConnection = true)
+
         CoroutineScope(Dispatchers.IO).launch {
-            logger.info("[GitSageConfigurable] testConnection - Starting coroutine")
+            logger.debug("[GitSageConfigurable] testConnection - Starting coroutine")
             try {
-                logger.info("[GitSageConfigurable] testConnection - Calling ModelListFetcher.testConnection()")
+                logger.debug("[GitSageConfigurable] testConnection - Calling ModelListFetcher.testConnection()")
                 val (success, message) = ModelListFetcher.testConnection(baseUrl, apiKey, providerType, selectedModel)
-                logger.info("[GitSageConfigurable] testConnection - Result: success=$success")
+                logger.debug("[GitSageConfigurable] testConnection - Result: success=$success")
                 withContext(Dispatchers.Main) {
                     if (success) {
                         showMessage(message, "Success", JOptionPane.INFORMATION_MESSAGE)
@@ -387,15 +463,12 @@ class GitSageConfigurable : Configurable {
             } catch (e: Exception) {
                 logger.error("[GitSageConfigurable] testConnection - Exception occurred", e)
                 withContext(Dispatchers.Main) {
-                    val errorDetail = buildString {
-                        appendLine("Error Type: ${e.javaClass.simpleName}")
-                        appendLine()
-                        appendLine("Message: ${e.message}")
-                        appendLine()
-                        appendLine("Stack Trace:")
-                        e.stackTrace.take(15).forEach { appendLine(it.toString()) }
-                    }
+                    val errorDetail = buildCompactErrorDetail(e)
                     showDetailedError("Connection Failed", errorDetail)
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    setBusyState(testingConnection = false)
                 }
             }
         }
@@ -406,25 +479,17 @@ class GitSageConfigurable : Configurable {
     }
 
     private fun showDetailedError(title: String, message: String) {
-        val textArea = javax.swing.JTextArea(message).apply {
-            isEditable = false
-            lineWrap = true
-            wrapStyleWord = true
-            rows = 20
-            columns = 60
-            font = java.awt.Font("Monospaced", java.awt.Font.PLAIN, 12)
-        }
+        NotificationHelper.showDetailedError(getActiveProject(), title, message)
+    }
 
-        val scrollPane = javax.swing.JScrollPane(textArea).apply {
-            preferredSize = java.awt.Dimension(600, 400)
-        }
+    private fun getActiveProject() = ProjectManager.getInstance().openProjects.firstOrNull()
 
-        JOptionPane.showMessageDialog(
-            mainPanel,
-            scrollPane,
-            title,
-            JOptionPane.ERROR_MESSAGE
-        )
+    private fun buildCompactErrorDetail(e: Exception): String {
+        return buildString {
+            appendLine("Error Type: ${e.javaClass.simpleName}")
+            appendLine("Message: ${e.message ?: "<empty>"}")
+            appendLine("Details: Full stack trace was written to IDE log")
+        }
     }
 
     override fun isModified(): Boolean {
@@ -510,12 +575,14 @@ class GitSageConfigurable : Configurable {
     }
 
     private fun getFilterSourceModels(): List<String> {
-        return allModelOptions
+        val free = allModelOptions.filter { freeModelIds.contains(it.lowercase()) }
+        val paid = allModelOptions.filterNot { freeModelIds.contains(it.lowercase()) }
+        return free + paid
     }
 
     private fun setAllModelOptions(items: List<String>) {
         allModelOptions.clear()
-        allModelOptions.addAll(items.filter { it.isNotBlank() }.distinct().sorted())
+        allModelOptions.addAll(items.filter { it.isNotBlank() }.distinct())
         refreshModelComboItems(allModelOptions)
     }
 
@@ -624,6 +691,64 @@ class GitSageConfigurable : Configurable {
     override fun reset() {
         modelSearchDebounceTimer.stop()
         currentLoadedProviderId = null
+        setBusyState(fetchingModels = false, testingConnection = false)
         loadSettings()
+    }
+
+    private fun setBusyState(fetchingModels: Boolean = isFetchingModels, testingConnection: Boolean = isTestingConnection) {
+        isFetchingModels = fetchingModels
+        isTestingConnection = testingConnection
+
+        val busy = isFetchingModels || isTestingConnection
+        val fetchText = if (isFetchingModels) "Fetching..." else "Fetch Models"
+        val testText = if (isTestingConnection) "Testing..." else "Test Connection"
+
+        fetchModelsButton.text = fetchText
+        testConnectionButton.text = testText
+
+        fetchModelsButton.isEnabled = !busy
+        testConnectionButton.isEnabled = !busy
+        providerCombo.isEnabled = !busy
+        formComponents.forEach { it.isEnabled = !busy }
+
+        operationStatusLabel.text = when {
+            isFetchingModels -> "Fetching model list..."
+            isTestingConnection -> "Testing connection..."
+            else -> "Ready"
+        }
+        operationStatusLabel.foreground = if (busy) geistForeground() else geistMutedForeground()
+    }
+
+    private fun sortModelsFreeFirst(models: List<ModelInfo>): List<String> {
+        return models
+            .sortedWith(
+                compareBy<ModelInfo> { !isFreeModel(it) }
+                    .thenBy { it.name?.lowercase().orEmpty() }
+                    .thenBy { it.id.lowercase() }
+            )
+            .map { it.id }
+            .distinct()
+    }
+
+    private fun extractFreeModelIds(models: List<ModelInfo>): Set<String> {
+        return models
+            .filter { isFreeModel(it) }
+            .map { it.id.lowercase() }
+            .toSet()
+    }
+
+    private fun isFreeModel(model: ModelInfo): Boolean {
+        val raw = buildString {
+            append(model.id)
+            append(' ')
+            append(model.name.orEmpty())
+            append(' ')
+            append(model.description.orEmpty())
+        }.lowercase()
+
+        return raw.contains("free") ||
+            raw.contains("免费") ||
+            raw.contains(":free") ||
+            raw.contains("(free)")
     }
 }
